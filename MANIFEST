@@ -1,0 +1,16 @@
+.perlcriticrc
+.perltidyrc
+Build.PL
+Changes
+ignore.txt
+lib/IPlant/Buggalo.pm
+LICENSE.txt
+MANIFEST			This list of files
+MANIFEST.skip
+README
+t/boilerplate.t
+t/manifest.t
+t/pod.t
+Makefile.PL
+META.yml
+META.json

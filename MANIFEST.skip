@@ -1,0 +1,7 @@
+^\.git
+\.bak$
+^_build
+^blib
+^MYMETA\.yml$
+^MYMETA\.json$
+^IPlant-Buggalo.*\.tar\.gz$

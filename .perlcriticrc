@@ -1,0 +1,7 @@
+# ------------------------------------------------------------------------
+# Report everything by default.
+severity = 1
+
+# ------------------------------------------------------------------------
+# Git recommends against using keyword expansion.
+[-Miscellanea::RequireRcsKeywords]
