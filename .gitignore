@@ -14,3 +14,5 @@ IPlant-Buggalo-*
 *.bak
 MYMETA.*
 META.*
+\#*
+*~
