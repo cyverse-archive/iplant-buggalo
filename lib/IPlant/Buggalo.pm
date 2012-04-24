@@ -17,19 +17,24 @@ use English qw(-no_match_vars);
 use File::Basename;
 use HTTP::Request;
 use HTTP::Request::Common;
+use IPlant::Clavin;
 use JSON;
 use LWP::UserAgent;
 use Readonly;
 use URI::Escape;
 
-use version; our $VERSION = qv('0.4.0');
+use version; our $VERSION = qv('0.4.1');
+
+# Values used to retrieve configuration settings.
+Readonly my $ZOOKEEPER_PARM => 'zookeeper';
+Readonly my $SERVICE_NAME   => 'buggalo';
 
 # The configuration parameters supported by this handler.
 Readonly my %CONFIG_PARM_FOR => (
-    'nibblonian-prefix=s' => 'NibblonianPrefix',
-    'scruffian-prefix=s'  => 'ScruffianPrefix',
-    'tree-parser-url=s'   => 'TreeParserUrl',
-    'accepted-formats=a'  => 'AcceptedTreeFormats',
+    'nibblonian-prefix=s' => 'buggalo.nibblonian-prefix',
+    'scruffian-prefix=s'  => 'buggalo.scruffian-prefix',
+    'tree-parser-url=s'   => 'buggalo.tree-parser-url',
+    'accepted-formats=a'  => 'buggalo.accepted-tree-formats',
 );
 
 # The actual configuration settings; these will only be loaded once.
@@ -50,7 +55,9 @@ Readonly my %HANDLER_METHOD_FOR => (
 #
 # Parameters : $r - the Apache request object.
 #
-# Throws     : "INTERNAL ERROR: unrecognized configuration type"
+# Throws     : "CONFIGURATION ERROR: missing $ZOOKEEPER_PARM perl var"
+#              "CONFIGURATION ERROR: services not allowed on this host"
+#              "INTERNAL ERROR: unrecognized configuration type"
 #              "CONFIGURATION ERROR: missing $name config parameter"
 sub handler {
     my ($r) = @_;
@@ -72,66 +79,98 @@ sub handler {
 #
 # Parameters : $r - the Apache request object.
 #
-# Throws     : "INTERNAL ERROR: unrecognized configuration type"
+# Throws     : "CONFIGURATION ERROR: missing $ZOOKEEPER_PARM perl var"
+#              "CONFIGURATION ERROR: services not allowed on this host"
+#              "INTERNAL ERROR: unrecognized configuration type"
 #              "CONFIGURATION ERROR: missing $name config parameter"
 sub _init {
     my ($r) = @_;
     return if %config;
-    %config = map { _config_parm( $r, $_ ) } keys %CONFIG_PARM_FOR;
+    %config = _load_config($r);
     return;
 }
 
 ##########################################################################
-# Usage      : ( $name, $value ) = _config_parm( $r, $desc );
+# Usage      : %config = _load_config($r);
 #
-# Purpose    : Extracts a configuration parameter from the Apache request
-#              object.
+# Purpose    : Loads the configuration settings from Zookeeper.
+#
+# Returns    : the configuration settings.
+#
+# Parameters : $r - the Apache request object.
+#
+# Throws     : "CONFIGURATION ERROR: missing $ZOOKEEPER_PARM perl var"
+#              "CONFIGURATION ERROR: services not allowed on this host"
+#              "INTERNAL ERROR: unrecognized configuration type"
+#              "CONFIGURATION ERROR: missing $name config parameter"
+sub _load_config {
+    my ($r) = @_;
+
+    # Fetch the zookeeper connection string.
+    my $zookeeper = $r->dir_config($ZOOKEEPER_PARM);
+    croak "CONFIGURATION ERROR: missing $ZOOKEEPER_PARM perl var"
+        if !defined $zookeeper;
+
+    # Retrieve the configuration settings.
+    my $clavin_ref = IPlant::Clavin->new( { zk_hosts => $zookeeper } );
+    croak "CONFIGURATION ERROR: services not allowed on this host"
+        if !$clavin_ref->can_run();
+    my $props_ref = $clavin_ref->properties($SERVICE_NAME);
+
+    return map { _config_parm( $props_ref, $_ ) } keys %CONFIG_PARM_FOR;
+}
+
+##########################################################################
+# Usage      : ( $name, $value ) = _config_parm( $props_ref, $desc );
+#
+# Purpose    : Extracts a configuration parameter from the configuration
+#              settings.
 #
 # Returns    : The internal configuration parameter name and value.
 #
-# Parameters : $r    - the Apache request object.
-#              $desc - the configuration parameter descriptor.
+# Parameters : $props_ref - a reference to the configuration properties.
+#              $desc      - the configuration parameter descriptor.
 #
 # Throws     : "INTERNAL ERROR: unrecognized configuration type"
 #              "CONFIGURATION ERROR: missing $name config parameter"
 sub _config_parm {
-    my ( $r, $desc ) = @_;
+    my ( $props_ref, $desc ) = @_;
 
     # Extract the internal name and configuration parameter type.
     my ( $name, $type ) = split m/=/xms, $desc, 2;
 
     # Determine how to extract the parameter.
     my $getter_ref
-        = $type eq 's' ? sub { _scalar_config_parm( $r, $name ) }
-        : $type eq 'a' ? sub { _array_config_parm( $r, $name ) }
+        = $type eq 's' ? \&_scalar_config_parm
+        : $type eq 'a' ? \&_array_config_parm
         :                undef;
     croak "INTERNAL ERROR: unrecognized configuration type: $type"
         if !defined $getter_ref;
 
     # Return the internal parameter name and value.
-    return ( $name, $getter_ref->() );
+    return ( $name, $getter_ref->( $props_ref, $name ) );
 }
 
 ##########################################################################
-# Usage      : $value = _scalar_config_parm( $r, $internal_name );
+# Usage      : $value = _scalar_config_parm( $props_ref, $internal_name );
 #
 # Purpose    : Extracts the value of a scalar configuration parameter from
-#              the Apache request object.
+#              the configuration settings.
 #
 # Returns    : The configuration parameter value.
 #
-# Parameters : $r             - the Apache request object.
+# Parameters : $props_ref     - a reference to the configuration settings.
 #              $internal_name - the internal configuration parameter name.
 #
 # Throws     : "CONFIGURATION ERROR: missing $name config parameter"
 sub _scalar_config_parm {
-    my ( $r, $internal_name ) = @_;
+    my ( $props_ref, $internal_name ) = @_;
 
     # Get the external name for the parameter.
     my $name = $CONFIG_PARM_FOR{"$internal_name=s"};
 
     # Fetch the parameter value.
-    my $value = $r->dir_config($name);
+    my $value = $props_ref->{$name};
     croak "CONFIGURATION ERROR: missing $name config parameter"
         if !defined $value;
 
@@ -139,30 +178,31 @@ sub _scalar_config_parm {
 }
 
 ##########################################################################
-# Usage      : $values_ref = _array_config_parm( $r, $internal_name );
+# Usage      : $values_ref = _array_config_parm( $props_ref,
+#                  $internal_name );
 #
 # Purpose    : Extracts teh value of an array configuration parameter from
-#              the Apache request object.
+#              the configuration settings.
 #
 # Returns    : The configuration parameter value.
 #
-# Parameters : $r             - the Apache request object.
+# Parameters : $props_ref     - a reference to the configuration settings.
 #              $internal_name - the internal configuration parameter name.
 #
 #
 # Throws     : "CONFIGURATION ERROR: missing $name config parameter"
 sub _array_config_parm {
-    my ( $r, $internal_name ) = @_;
+    my ( $props_ref, $internal_name ) = @_;
 
     # Get the external name for the parameter.
     my $name = $CONFIG_PARM_FOR{"$internal_name=a"};
 
     # Fetch the parameter value.
-    my @value = $r->dir_config()->get($name);
+    my $value = $props_ref->{$name};
     croak "CONFIGURATION ERROR: missing $name config parameter"
-        if !@value;
+        if !defined $value;
 
-    return \@value;
+    return [ split m/,\s*/xms, $value];
 }
 
 ##########################################################################
@@ -1031,7 +1071,7 @@ IPlant::Buggalo - mod_perl handler for a tree viewer extraction service.
 
 =head1 VERSION
 
-This documentation refers to IPlant::Buggalo Version 0.4.0
+This documentation refers to IPlant::Buggalo Version 0.4.1
 
 =head1 SYNOPSIS
 
@@ -1039,15 +1079,7 @@ This documentation refers to IPlant::Buggalo Version 0.4.0
     <Location /mulcher>
         SetHandler modperl
         PerlResponseHandler IPlant::Buggalo
-        PerlSetVar NibblonianPrefix    "http://somehost/nibblonian"
-        PerlSetVar ScruffianPrefix     "http://somehost/scruffian"
-        PerlSetVar TreeParserUrl       "http://somehost/parseTree"
-        PerlAddVar AcceptedTreeFormats "nexml"
-        PerlAddVar AcceptedTreeFormats "rnaaln"
-        PerlAddVar AcceptedTreeFormats "aaaln"
-        PerlAddVar AcceptedTreeFormats "relaxedphyliptree"
-        PerlAddVar AcceptedTreeFormats "discretephyliptree"
-        PerlAddVar AcceptedTreeFormats "nexus"
+        PerlSetVar zookeeper "by-tor:1234,snow-dog:4321"
     </Location>
 
     # Calling the service using curl.
@@ -1136,6 +1168,18 @@ for information about the behavior of this subroutine.
 
 =head1 DIAGNOSTICS
 
+=head2 CONFIGURATION ERROR: missing zookeeper perl var
+
+The perl variable used to tell the module how to connect to Zookeeper was not
+provided in the loation configuration in the Apache configuration file.
+Verify that the Apache configuration file is correct.
+
+=head2 CONFIGURATION ERROR: services are not allowed on this host
+
+Zookeeper has no ACL information for the local host.  Verify that the
+Zookeeper connection string in the Apache configuration file is correct and
+that the ACLs that have been loaded into Zookeeper using Clavin are correct.
+
 =head2 INTERNAL ERROR: unrecognized configuration type
 
 One of the configuration types used when loading the configuration settings
@@ -1201,28 +1245,52 @@ A simple service configuration looks something like this:
     <Location /mulcher>
         SetHandler modperl
         PerlResponseHandler IPlant::Buggalo
-        PerlSetVar NibblonianPrefix    "http://somehost/nibblonian"
-        PerlSetVar ScruffianPrefix     "http://somehost/scruffian"
-        PerlSetVar TreeParserUrl       "http://somehost/parseTree"
-        PerlAddVar AcceptedTreeFormats "relaxedphyliptree"
-        PerlAddVar AcceptedTreeFormats "nexus"
+        PerlSetVar zookeeper "by-tor:1234,snow-dog:4321"
     </Location>
 
 The handler should always be set to "modperl" and the response handler should
-be set to the name of this module.  This module currently has four required
-configuration settings: C<NibblonianPrefix>, C<ScruffianPrefix>,
-C<TreeParserUrl> and C<AcceptedTreeFormats>.
+be set to the name of this module.  This module currently has one
+configuration parameter that must be included in the location definition:
+C<zookeeper>.  This configuration setting contains the Zookeeper connection
+settings.  There are also several different configuraiton settings that must
+be loaded into Zookeeper using Clavin: C<buggalo.nibblonian-prefix>,
+C<buggalo.scruffian-prefix>, C<buggalo.tree-parser-url> and
+C<buggalo.accepted-tree-formats>.  The properties that are loaded into
+Zookeeper by Clavin should have the name C<buggalo.properties>, and should
+look something like this:
+
+    # The base URLs to use when contacting various services.
+    buggalo.nibblonian-prefix = http://by-tor:8888
+    buggalo.scruffian-prefix  = http://by-tor:9999
+    buggalo.tree-parser-url   = http://snow-dog/parseTree
+
+    # The tree formats that the service can accept.
+    buggalo.accepted-tree-formats = nexml, rnaaln, aaaln
 
 Because of limitations inherent in the way that this module handles
 configuration settings, only one service may be configured to use this module
 on any given server.
 
-=head2 NibblonianPrefix
+=head2 zookeeper
 
-This configuration setting specifies the URL prefix to use when contacting
-Nibblonian services.  This should be specified up to and including the context
-name.  For example, if the host name is C<by-tor.iplantc.org> and the context
-name is C<nibblonian> then the value of this configuration setting would be
+This configuration setting is specified in the location definition for the
+service using C<PerlSetVar> as described above.  The value of this
+configuraiton setting should be a standard Zookeeper connection string in the
+format C<host1:port1,host2:port2,...,hostn:portn>.  For example, the
+connection string could be something like this:
+
+    by-tor:1234,snow-dog:4321
+
+This would indicate that Zookeeper can be contacted by connecting to by-tor on
+port 1234 or by connecting to snow-dog on port 4321.
+
+=head2 buggalo.nibblonian-prefix
+
+This configuration setting is specified in the properties that are stored in
+Zookeeper and contains the URL prefix to use when contacting Nibblonian
+services.  This should be specified up to and including the context name.  For
+example, if the host name is C<by-tor.iplantc.org> and the context name is
+C<nibblonian> then the value of this configuration setting would be
 
     http://by-tor.iplantc.org/nibblonian
 
@@ -1236,13 +1304,14 @@ Note that this configuration parameter must point to the same Nibblonian
 instance that is used by the DE.  A service mismatch will cause apparently
 incorrect C<file not found> messages.
 
-=head2 ScruffianPrefix
+=head2 buggalo.scruffian-prefix
 
-This configuration setting specifies the URL prefix to use when contacting
-Scruffian services.  This should be specified up to and including the context
-name if there is one.  For example, if the host name is C<by-tor.iplantc.org>
-and the context name is C<scruffian> then the value of this configuration
-setting would be
+This configuration setting is specified in the properties that are stored in
+Zookeeper and contains the URL prefix to use when contacting Scruffian
+services.  This should be specified up to and including the context name if
+there is one.  For example, if the host name is C<by-tor.iplantc.org> and the
+context name is C<scruffian> then the value of this configuration setting
+would be
 
     http://by-tor.iplantc.org/scruffian
 
@@ -1253,25 +1322,33 @@ parameter would be
     http://snow-dog.iplantc.org:14444/scruffian_123
 
 Note that this configuration parameter must point to the same Scruffian
-instance that is used by the DE.  A service mismatch will cause apparently
+instance that is used by the DE.  A service mismatch will cause the apparently
 incorrect C<file not found> messages.
 
 =head2 TreeParserUrl
 
-This configuration setting specifies the URL to use when contacting the tree
-parser service.  The value of this setting should be the full tree parser
-service URL.  The URL will generally be in the following format:
+This configuration setting is specified in the properties that are stored in
+Zookeeper and contains the URL to use when contacting the tree parser service.
+The value of this setting should be the full tree parser service URL.  The URL
+will generally be in the following format:
 
     http://hostname.iplantcollaborative.org/parseTree
 
 =head2 AcceptedTreeFormats
 
-This configuration setting specifies the tree formats that are accepted by
-this service.  This configuration setting should be specified once for every
-tree format that is supported by the service.  The set of formats accepted by
-this configuration parameter is the same as the set of formats supported by
-the Nexus Class Library.  At the time of this writing the supported formats
-are:
+This configuration setting is specified in the properties that are stored in
+Zookeeper and contains the list of formats that are accepted by this service.
+The value of this setting should be a comma-delimited list containing the
+names of the accepted tree formats.  Whitespace may optionally be included
+after each comma in the string. For exmaple, if the formats,
+C<relaxedphyliptree>, C<discretephyliptree> and C<nexus>, are all supported
+then the value of this configuration setting should be something like this:
+
+    relaxedphyliptree, discretephyliptree, nexus
+
+The set of formats accepted by this configuration parameter is the same as the
+set of formats supported by the Nexus Class Library.  At the time of this
+writing the supported formats are:
 
     nexus
     dnafasta
@@ -1360,6 +1437,10 @@ This module is available from CPAN.
 =head2 URI::Escape 3.29
 
 This module is included with URI, which is available from CPAN.
+
+=head2 IPlant::Clavin 0.1.0
+
+This module is available from iPlant's local CPAN repository.
 
 =head2 Inline::CPP 0.25
 

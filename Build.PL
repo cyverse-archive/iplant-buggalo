@@ -26,6 +26,7 @@ my $builder = Module::Build->new(
         'URI::Escape'           => '3.29',
         'Inline::CPP'           => '0.25',
         'Inline'                => '0.48',
+        'IPlant::Clavin'        => 'v0.1.0',
         'perl'                  => 5.006,
     },
     add_to_cleanup     => ['IPlant-Buggalo-*'],

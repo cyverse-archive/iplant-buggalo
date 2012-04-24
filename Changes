@@ -60,3 +60,6 @@ Revision history for IPlant-Buggalo
 0.4.0   Fri Mar 30 16:38:58 2012
         Added some code to tell the NCL to be more lax in its parsing rules.
 
+0.4.1   Tue Apr 24 16:16:32 2012
+        Moved most of the configuration settings from the Apache configuration
+        file into Zookeeper.
